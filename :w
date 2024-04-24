@@ -56,18 +56,18 @@ async fn get_messages_from_db(client: Client) -> Result<Vec<String>, aws_sdk_dyn
     let attr_val = AttributeValue::S("test2".to_string());
     let response = client
         .query()
-        .table_name("Messages")
+        .table_name("Chats")
         .key_condition_expression("Chatter=:value")
         .expression_attribute_values(":value", attr_val)
         .send()
         .await;
 
     for item in response.unwrap().items.unwrap() {
-        let message = item.get("value").unwrap().as_s().unwrap().to_string();
+        let message = item.get("value").unwrap().as_s().unwrap();
         messages.push(message);
     }
 
-    println!("Messages: {:?}", messages);
+    println!("Items: {:?}", response.unwrap().items);
 
     Ok(messages)
 }
