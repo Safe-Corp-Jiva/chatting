@@ -11,3 +11,5 @@ aws-sdk-dynamodb = "1.23.0"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
 futures-util = "0.3"
+url = "2.5.0"
+httparse = "1.8.0"

@@ -432,8 +432,10 @@ dependencies = [
  "aws-config",
  "aws-sdk-dynamodb",
  "futures-util",
+ "httparse",
  "tokio",
  "tokio-tungstenite",
+ "url",
 ]
 
 [[package]]
