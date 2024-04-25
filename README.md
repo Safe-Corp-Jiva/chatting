@@ -29,8 +29,8 @@ This project uses the following crates:
 
 1. **Clone the repository:**
    ```bash
-   git clone https://yourrepositoryurl.git
-   cd ChatWithDynamoDB
+   git clone [https://yourrepositoryurl.git](https://github.com/Safe-Corp-Jiva/chatting.git)
+   cd chatting
    ```
 
 2. **Build the application:**
