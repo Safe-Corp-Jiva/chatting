@@ -1,111 +1,85 @@
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt};
-
-use aws_sdk_dynamodb::{types::AttributeValue, Client, Error as DynamoError};
-use tokio_tungstenite::tungstenite::protocol::Message;
-
+use aws_sdk_dynamodb::{types::AttributeValue, Client};
+use serde::Deserialize;
 use uuid::Uuid as UUID;
 
-// MESSAGE INSTANCE
-#[derive(Debug, Deserialize, Clone)]
-pub struct CallMessage {
-    #[serde(default = "uuid::Uuid::new_v4", skip_deserializing)]
-    message_id: UUID,
-    call_id: String,
-    sender: String,
-    message: String,
+use core::fmt;
+
+use aws_sdk_dynamodb::Error as DynamoError;
+
+use crate::{
+    agents::{AgentMessage, DBItem},
+    copilot::CopilotMessage,
+};
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub enum MessageType {
+    User(AgentMessage),
+    Copilot(CopilotMessage),
 }
 
-type DBItem = HashMap<String, AttributeValue>;
-
-impl fmt::Display for CallMessage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Message ID: {}, Call ID: {}, Sender: {}, Message: {}",
-            self.message_id, self.call_id, self.sender, self.message
-        )
-    }
-}
-
-impl Into<Message> for CallMessage {
-    fn into(self) -> Message {
-        Message::Text(self.message)
-    }
-}
-
-impl CallMessage {
-    pub fn new(message_id: UUID, call_id: String, sender: String, message: String) -> Self {
-        Self {
-            message_id,
-            call_id,
-            sender,
-            message,
+impl MessageType {
+    pub fn get_value(&self) -> String {
+        match self {
+            MessageType::User(message) => message.get_value().to_string(),
+            MessageType::Copilot(message) => message.get_message().to_string(),
         }
     }
 
-    pub fn from_db_item(item: HashMap<String, AttributeValue>) -> Result<Self, MessageError> {
-        let message_id = item
-            .get("MessageID")
-            .and_then(|v| v.as_s().ok())
-            .ok_or_else(|| MessageError::InvalidAttribute("MessageID".to_string()))?;
-
-        let call_id = item
-            .get("CallID")
-            .and_then(|v| v.as_s().ok())
-            .ok_or_else(|| MessageError::InvalidAttribute("CallID".to_string()))?;
-
-        let sender = item
-            .get("Sender")
-            .and_then(|v| v.as_s().ok())
-            .ok_or_else(|| MessageError::InvalidAttribute("Sender".to_string()))?;
-
-        let message = item
-            .get("Message")
-            .and_then(|v| v.as_s().ok())
-            .ok_or_else(|| MessageError::InvalidAttribute("Message".to_string()))?;
-
-        Ok(Self {
-            message_id: UUID::parse_str(message_id).unwrap(),
-            call_id: call_id.to_string(),
-            sender: sender.to_string(),
-            message: message.to_string(),
-        })
-    }
-    pub fn get_message_id(&self) -> String {
-        self.message_id.to_string()
-    }
-
-    pub fn get_call_id(&self) -> &str {
-        &self.call_id
-    }
-
-    pub fn get_value(&self) -> &str {
-        &self.message
-    }
-
-    pub fn get_owner(&self) -> &str {
-        &self.sender
-    }
-
-    pub fn to_db_item(&self) -> Result<DBItem, MessageError> {
-        let mut item = HashMap::new();
-        println!("Message: {:?}", self);
-        item.insert(
-            "MessageID".to_string(),
-            AttributeValue::S(self.message_id.to_string()),
-        );
-        item.insert(
-            "CallID".to_string(),
-            AttributeValue::S(self.call_id.clone()),
-        );
-        item.insert(
-            "Message".to_string(),
-            AttributeValue::S(self.message.clone()),
-        );
-        item.insert("Sender".to_string(), AttributeValue::S(self.sender.clone()));
-
+    pub fn to_db_item(&self, call_id: &str) -> Result<DBItem, MessageError> {
+        let mut item = match self {
+            MessageType::User(message) => message.to_db_item(),
+            MessageType::Copilot(message) => message.to_db_item(),
+        }
+        .unwrap();
+        item.insert("CallID".to_string(), AttributeValue::S(call_id.to_string()));
         Ok(item)
+    }
+
+    pub fn from_db_item(item: DBItem) -> Result<MessageType, MessageError> {
+        if item.contains_key("Action") {
+            CopilotMessage::from_db_item(item).map(MessageType::Copilot)
+        } else {
+            AgentMessage::from_db_item(item).map(MessageType::User)
+        }
+    }
+}
+
+impl std::fmt::Display for MessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MessageType::User(message) => write!(f, "{}", message),
+            MessageType::Copilot(message) => write!(f, "{}", message),
+        }
+    }
+}
+
+// METHODS FOR MESSAGES
+pub async fn send_message_to_db(
+    client: &Client,
+    message: MessageType,
+    call_id: &str,
+) -> Result<(), MessageError> {
+    match message.to_db_item(call_id) {
+        Ok(item) => {
+            let req = client
+                .put_item()
+                .table_name("Messages")
+                .set_item(Some(item))
+                .send()
+                .await;
+            match req {
+                Ok(_) => {
+                    println!("Message sent to database: {}", message);
+                    Ok(())
+                }
+                Err(e) => Err(MessageError::DatabaseError(e.into())),
+            }
+        }
+        Err(e) => {
+            eprintln!("Error converting message to DB item: {}", e);
+            Err(MessageError::ConversionError)
+        }
     }
 }
 
@@ -113,7 +87,7 @@ impl CallMessage {
 #[derive(Debug)]
 pub struct CallChat {
     call_id: String,
-    messages: Vec<CallMessage>,
+    messages: Vec<MessageType>,
 }
 
 impl CallChat {
@@ -128,16 +102,31 @@ impl CallChat {
         &self.call_id
     }
     /// Add a message to the chat instance
-    pub fn add_message(&mut self, message: CallMessage) {
+    pub fn add_message(&mut self, message: MessageType) {
         self.messages.push(message);
     }
     /// Get all messages in the chat instance
-    pub fn get_messages(&self) -> &Vec<CallMessage> {
+    pub fn get_messages(&self) -> &Vec<MessageType> {
         &self.messages
     }
     /// Create a new message instance
-    pub fn new_message(&self, message_id: UUID, owner: String, message: String) -> CallMessage {
-        CallMessage::new(message_id, self.call_id.clone(), owner, message)
+    pub fn new_agent_message(
+        &self,
+        message_id: UUID,
+        owner: String,
+        message: String,
+    ) -> AgentMessage {
+        AgentMessage::new(message_id, self.call_id.clone(), owner, message)
+    }
+
+    /// Create a new copilot message instance
+    pub fn new_copilot_message(
+        &self,
+        message_id: UUID,
+        action: String,
+        output: String,
+    ) -> CopilotMessage {
+        CopilotMessage::new(message_id, action, output)
     }
 }
 
@@ -167,28 +156,5 @@ impl std::error::Error for MessageError {
             MessageError::DatabaseError(e) => Some(e),
             _ => None,
         }
-    }
-}
-
-// METHODS FOR MESSAGES
-pub async fn send_message_to_db(client: &Client, message: CallMessage) -> Result<(), MessageError> {
-    match message.to_db_item() {
-        Ok(item) => {
-            let req = client
-                .put_item()
-                .table_name("Messages")
-                .item("MessageID", item.get("MessageID").unwrap().clone())
-                .item("Sender", item.get("Sender").unwrap().clone())
-                .item("CallID", item.get("CallID").unwrap().clone())
-                .item("Message", item.get("Message").unwrap().clone());
-            match req.send().await {
-                Ok(_) => {
-                    println!("Message sent to database: {}", message);
-                    Ok(())
-                }
-                Err(e) => Err(MessageError::DatabaseError(e.into()).into()),
-            }
-        }
-        Err(_) => Err(MessageError::ConversionError.into()),
     }
 }

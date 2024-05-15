@@ -1,10 +1,14 @@
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_dynamodb::Client;
 use futures_util::{SinkExt, StreamExt};
-use messages::CallMessage;
+use messages::CallChat;
+use messages::{send_message_to_db, MessageType};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::tungstenite::{Error, Message as WsMessage};
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 
+mod agents;
+mod copilot;
 mod init;
 mod messages;
 
@@ -37,9 +41,9 @@ async fn handle_connection(stream: TcpStream, client: Client) {
 
     let (mut write, mut read) = ws_stream.split();
 
-    let mut conversation = messages::CallChat::new(call_id.to_string());
+    let mut conversation = CallChat::new(call_id.to_string());
 
-    let initial_messages: Vec<messages::CallMessage> =
+    let initial_messages: Vec<MessageType> =
         init::get_messages_from_db(&client, call_id.to_string(), owner.to_string())
             .await
             .expect("Failed to get messages from db");
@@ -52,12 +56,24 @@ async fn handle_connection(stream: TcpStream, client: Client) {
         conversation.add_message(message);
     }
 
-    while let Some(Ok(message)) = read.next().await {
-        let message_str = message.to_string();
-        let message: CallMessage = serde_json::from_str(&message_str).unwrap();
+    handle_messages(&mut read, &client, &call_id).await;
+}
 
-        messages::send_message_to_db(&client, message)
-            .await
-            .expect("Failed to send message to db");
+async fn handle_messages(
+    read: &mut (impl StreamExt<Item = Result<WsMessage, Error>> + Unpin),
+    client: &Client,
+    call_id: &str,
+) {
+    while let Some(Ok(message)) = read.next().await {
+        if let WsMessage::Text(text) = message {
+            match serde_json::from_str::<MessageType>(&text) {
+                Ok(message) => {
+                    send_message_to_db(&client, message, &call_id)
+                        .await
+                        .expect("Failed to send message to db");
+                }
+                Err(e) => eprintln!("Error parsing message: {:?}", e),
+            }
+        }
     }
 }

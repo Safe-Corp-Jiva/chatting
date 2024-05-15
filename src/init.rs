@@ -1,4 +1,5 @@
 use httparse::{Request, EMPTY_HEADER};
+use messages::MessageType;
 
 use aws_sdk_dynamodb::{types::AttributeValue, Client, Error as DynamoError};
 use tokio::net::TcpStream;
@@ -10,7 +11,7 @@ pub async fn get_messages_from_db(
     client: &Client,
     call_id: String,
     owner: String,
-) -> Result<Vec<messages::CallMessage>, DynamoError> {
+) -> Result<Vec<MessageType>, DynamoError> {
     let mut messages = Vec::new();
 
     let owner = AttributeValue::S(owner.to_string());
@@ -28,7 +29,7 @@ pub async fn get_messages_from_db(
     if let Ok(result) = response {
         if let Some(items) = result.items {
             for item in items {
-                let message = messages::CallMessage::from_db_item(item);
+                let message = messages::MessageType::from_db_item(item);
                 match message {
                     Ok(message) => messages.push(message),
                     Err(e) => eprintln!("Error parsing message: {:?}", e),
