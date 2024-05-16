@@ -4,7 +4,7 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_dynamodb::Client;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
-use messages::{CallChat, MessageType};
+use messages::{Chat, MessageType};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -36,8 +36,8 @@ async fn main() {
 }
 
 async fn handle_connection(stream: TcpStream, client: Client) -> tokio::task::JoinHandle<()> {
-    let (call_id, owner) = match init::generate_params_from_url(&stream).await {
-        Ok((call_id, owner)) => (call_id, owner),
+    let (agent_id, secondary_id) = match init::generate_params_from_url(&stream).await {
+        Ok((agent_id, secondary_id)) => (agent_id, secondary_id),
         Err(e) => {
             eprintln!("Error parsing URL: {:?}", e);
             ("Err".to_string(), e.to_string())
@@ -45,7 +45,7 @@ async fn handle_connection(stream: TcpStream, client: Client) -> tokio::task::Jo
     };
 
     // Create call on db if it doesn't exist
-    let mut chat = Arc::new(CallChat::new(call_id));
+    let mut chat = Arc::new(Chat::new(agent_id, secondary_id));
     let client = Arc::new(client);
 
     init::send_chat_to_db(chat.clone(), client.clone())
@@ -61,10 +61,9 @@ async fn handle_connection(stream: TcpStream, client: Client) -> tokio::task::Jo
     let buffer = Arc::new(Mutex::new(VecDeque::new()));
 
     // Fetch initial messages and send to client
-    let initial_messages =
-        init::get_messages_from_db(&client, chat.get_call_id().to_string(), owner)
-            .await
-            .expect("Failed to get messages from db");
+    let initial_messages = init::get_messages_from_db(&client, chat.get_chat_id().to_string())
+        .await
+        .expect("Failed to get messages from db");
 
     for message in initial_messages {
         write
@@ -96,7 +95,7 @@ async fn handle_messages(
         >,
     >,
     buffer: Arc<Mutex<VecDeque<MessageType>>>,
-    chat: Arc<CallChat>,
+    chat: Arc<Chat>,
     client: Arc<Client>,
 ) {
     let mut read = read.lock().await;
@@ -123,7 +122,7 @@ async fn handle_messages(
 
 async fn process_buffer(
     buffer: Arc<Mutex<VecDeque<MessageType>>>,
-    chat: Arc<CallChat>,
+    chat: Arc<Chat>,
     client: Arc<Client>,
 ) {
     loop {
@@ -151,7 +150,7 @@ async fn process_buffer(
         time::sleep(TIMEOUT_DURATION).await;
     }
 }
-async fn handle_copilot_stream(chat: Arc<CallChat>, copilot_msg: CopilotMessage, client: &Client) {
+async fn handle_copilot_stream(chat: Arc<Chat>, copilot_msg: CopilotMessage, client: &Client) {
     // Assume the copilot message contains a JSON array of messages
     let messages: Vec<CopilotMessage> =
         serde_json::from_str(&copilot_msg.get_message()).unwrap_or_else(|_| vec![copilot_msg]);

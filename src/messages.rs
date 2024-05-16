@@ -56,22 +56,31 @@ impl std::fmt::Display for MessageType {
 
 // CHAT INSTANCE
 #[derive(Debug, Clone)]
-pub struct CallChat {
-    call_id: String,
+pub struct Chat {
+    chat_id: String,
     messages: Vec<MessageType>,
 }
 
-impl CallChat {
-    pub fn new(call_id: String) -> Self {
+impl Chat {
+    pub fn new(agent_id: String, secondary_id: String) -> Self {
+        let chat_id = format!("{}-{}", agent_id, secondary_id);
         Self {
-            call_id,
+            chat_id,
             messages: Vec::new(),
         }
     }
 
     /// Necessary getters
-    pub fn get_call_id(&self) -> &str {
-        &self.call_id
+    pub fn get_chat_id(&self) -> String {
+        self.chat_id.clone()
+    }
+
+    pub fn get_agent_id(&self) -> String {
+        self.chat_id.split('-').next().unwrap().to_string()
+    }
+
+    pub fn get_secondary_id(&self) -> String {
+        self.chat_id.split('-').last().unwrap().to_string()
     }
 
     /// Add a message to the chat instance
@@ -91,7 +100,7 @@ impl CallChat {
         owner: String,
         message: String,
     ) -> AgentMessage {
-        AgentMessage::new(message_id, self.call_id.clone(), owner, message)
+        AgentMessage::new(message_id, self.get_chat_id(), owner, message)
     }
 
     /// Create a new copilot message instance
@@ -105,7 +114,7 @@ impl CallChat {
         client: &Client,
         message: MessageType,
     ) -> Result<(), MessageError> {
-        match message.to_db_item(&self.call_id) {
+        match message.to_db_item(&self.get_chat_id()) {
             Ok(item) => {
                 let req = client
                     .put_item()
@@ -126,6 +135,12 @@ impl CallChat {
                 Err(MessageError::ConversionError)
             }
         }
+    }
+}
+
+impl std::fmt::Display for Chat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Chat ID: {}", self.chat_id)
     }
 }
 

@@ -1,6 +1,6 @@
+use crate::messages::Chat;
 use crate::messages::MessageError;
 use crate::messages::MessageType;
-use crate::CallChat;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::Client;
 use httparse::Request;
@@ -8,25 +8,24 @@ use httparse::EMPTY_HEADER;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
+use uuid::Uuid;
 
 use crate::messages;
 use url::Url;
 
 pub async fn get_messages_from_db(
     client: &Client,
-    call_id: String,
-    owner: String,
+    chat_id: String,
 ) -> Result<Vec<MessageType>, aws_sdk_dynamodb::Error> {
     let mut messages = Vec::new();
 
-    let owner = AttributeValue::S(owner.to_string());
-    let call_id = AttributeValue::S(call_id.to_string());
+    let chat_id = AttributeValue::S(chat_id.to_string());
 
     let response = client
         .scan()
         .table_name("Messages")
-        .filter_expression("CallID = :call_id")
-        .expression_attribute_values(":call_id", call_id.clone())
+        .filter_expression("ChatID = :chat_id")
+        .expression_attribute_values(":chat_id", chat_id.clone())
         .send()
         .await;
 
@@ -40,7 +39,7 @@ pub async fn get_messages_from_db(
                 }
             }
         } else {
-            println!("No messages found for call_id: {:?}", call_id);
+            println!("No messages found for chat_id: {:?}", chat_id);
         }
         for message in &messages {
             println!("Message: {}", message);
@@ -67,31 +66,32 @@ pub async fn generate_params_from_url(stream: &TcpStream) -> Result<(String, Str
     let path = req.path.expect("Request path is required");
 
     let url = Url::parse(&format!("http://dummyhost{}", path)).expect("Failed to parse URL");
-    let call_id = url
+    let chat_id = url
         .query_pairs()
-        .find(|(k, _)| k == "call_id")
+        .find(|(k, _)| k == "agentID")
         .map(|(_, v)| v)
         .unwrap_or_default();
 
     let owner = url
         .query_pairs()
-        .find(|(k, _)| k == "owner")
+        .find(|(k, _)| k == "secondaryID")
         .map(|(_, v)| v)
         .unwrap_or_default();
-    Ok((call_id.to_string(), owner.to_string()))
+    Ok((chat_id.to_string(), owner.to_string()))
 }
-pub async fn send_chat_to_db(chat: Arc<CallChat>, client: Arc<Client>) -> Result<(), MessageError> {
+
+pub async fn send_chat_to_db(chat: Arc<Chat>, client: Arc<Client>) -> Result<(), MessageError> {
     let table_name = "Chats";
-    let call_id = chat.get_call_id().to_string();
-    let call_id_attr = AttributeValue::S(call_id.clone());
-    let chatter_attr = AttributeValue::S("agent".to_string());
+    let chat_id = chat.get_chat_id().to_string();
+    let agent_id = chat.get_agent_id().to_string();
+    let secondary_id = chat.get_secondary_id().to_string();
 
     // Check if chat exists
     let query_req = client
         .get_item()
         .table_name(table_name)
-        .key("Chatter", chatter_attr.clone())
-        .key("CallID", call_id_attr.clone())
+        .key("AgentID", AttributeValue::S(agent_id.clone()))
+        .key("SecondaryID", AttributeValue::S(secondary_id.clone()))
         .send()
         .await;
 
@@ -100,8 +100,11 @@ pub async fn send_chat_to_db(chat: Arc<CallChat>, client: Arc<Client>) -> Result
             if query_resp.item.is_none() {
                 // Chat does not exist, insert it
                 let mut item = HashMap::new();
-                item.insert("CallID".to_string(), call_id_attr);
-                item.insert("Chatter".to_string(), chatter_attr);
+                item.insert("AgentID".to_string(), AttributeValue::S(agent_id.clone()));
+                item.insert(
+                    "SecondaryID".to_string(),
+                    AttributeValue::S(secondary_id.clone()),
+                );
                 let put_req = client
                     .put_item()
                     .table_name(table_name)
@@ -111,14 +114,14 @@ pub async fn send_chat_to_db(chat: Arc<CallChat>, client: Arc<Client>) -> Result
 
                 match put_req {
                     Ok(_) => {
-                        println!("Chat created in database: {}", call_id);
+                        println!("Chat created in database: {}", chat_id);
                         Ok(())
                     }
                     Err(e) => Err(MessageError::DatabaseError(e.into())),
                 }
             } else {
                 // Chat already exists
-                println!("Chat already exists: {}", call_id);
+                println!("Chat already exists: {}", chat_id);
                 Ok(())
             }
         }
