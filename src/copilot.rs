@@ -2,7 +2,7 @@ use core::fmt;
 use std::collections::HashMap;
 
 use aws_sdk_dynamodb::types::AttributeValue;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid as UUID;
 
 use crate::{agents::DBItem, messages::MessageError};
@@ -11,9 +11,20 @@ fn default_sender() -> String {
     "Copilot".to_string()
 }
 
-#[derive(Deserialize, Debug, Clone)]
+fn default_serialize_uuid<S>(uuid: &UUID, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&uuid.to_string())
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct CopilotMessage {
-    #[serde(default = "uuid::Uuid::new_v4", skip_deserializing)]
+    #[serde(
+        default = "uuid::Uuid::new_v4",
+        skip_deserializing,
+        serialize_with = "default_serialize_uuid"
+    )]
     message_id: UUID,
     action: String,
     output: String,

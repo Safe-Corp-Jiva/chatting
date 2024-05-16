@@ -1,5 +1,5 @@
 use aws_sdk_dynamodb::{types::AttributeValue, Client};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid as UUID;
 
 use core::fmt;
@@ -11,7 +11,7 @@ use crate::{
     copilot::CopilotMessage,
 };
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum MessageType {
     User(AgentMessage),

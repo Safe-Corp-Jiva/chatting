@@ -24,7 +24,7 @@ pub async fn get_messages_from_db(
     let response = client
         .scan()
         .table_name("Messages")
-        .filter_expression("ChatID = :chat_id")
+        .filter_expression("CallID = :chat_id")
         .expression_attribute_values(":chat_id", chat_id.clone())
         .send()
         .await;

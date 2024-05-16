@@ -71,8 +71,9 @@ async fn handle_connection(stream: TcpStream, client: Client) -> tokio::task::Jo
         .expect("Failed to get messages from db");
 
     for message in initial_messages {
+        let message_json = serde_json::json!(message).to_string();
         write
-            .send(Message::Text(message.to_string()))
+            .send(Message::Text(message_json))
             .await
             .expect("Failed to send message to client");
     }

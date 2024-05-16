@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt};
 
 use aws_sdk_dynamodb::types::AttributeValue;
@@ -9,9 +9,21 @@ use uuid::Uuid as UUID;
 use crate::messages::MessageError;
 
 // MESSAGE INSTANCE
-#[derive(Debug, Deserialize, Clone)]
+//
+fn default_serialize_uuid<S>(uuid: &UUID, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&uuid.to_string())
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AgentMessage {
-    #[serde(default = "uuid::Uuid::new_v4", skip_deserializing)]
+    #[serde(
+        default = "uuid::Uuid::new_v4",
+        skip_deserializing,
+        serialize_with = "default_serialize_uuid"
+    )]
     message_id: UUID,
     call_id: String,
     sender: String,
