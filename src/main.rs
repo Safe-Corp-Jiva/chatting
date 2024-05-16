@@ -27,11 +27,18 @@ async fn main() {
     let config = aws_config::from_env().region(region_provider).load().await;
     let client = Client::new(&config);
 
-    let addr = "127.0.0.1:3030";
+    let addr = "localhost:3030";
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
 
-    while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(handle_connection(stream, client.clone()));
+    println!("Listening on: {}", addr);
+
+    match listener.accept().await {
+        Ok((stream, _)) => {
+            tokio::spawn(handle_connection(stream, client.clone()));
+        }
+        Err(e) => {
+            eprintln!("Error accepting connection: {:?}", e);
+        }
     }
 }
 
