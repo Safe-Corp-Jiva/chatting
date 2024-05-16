@@ -1,28 +1,32 @@
-use httparse::{Request, EMPTY_HEADER};
-use messages::MessageType;
-
-use aws_sdk_dynamodb::{types::AttributeValue, Client, Error as DynamoError};
+use crate::messages::MessageError;
+use crate::messages::MessageType;
+use crate::CallChat;
+use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::Client;
+use httparse::Request;
+use httparse::EMPTY_HEADER;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::net::TcpStream;
-use url::Url;
 
 use crate::messages;
+use url::Url;
 
 pub async fn get_messages_from_db(
     client: &Client,
     call_id: String,
     owner: String,
-) -> Result<Vec<MessageType>, DynamoError> {
+) -> Result<Vec<MessageType>, aws_sdk_dynamodb::Error> {
     let mut messages = Vec::new();
 
     let owner = AttributeValue::S(owner.to_string());
     let call_id = AttributeValue::S(call_id.to_string());
 
     let response = client
-        .query()
+        .scan()
         .table_name("Messages")
-        .key_condition_expression("Sender=:value AND CallID=:call_id")
-        .expression_attribute_values(":value", owner)
-        .expression_attribute_values(":call_id", call_id)
+        .filter_expression("CallID = :call_id")
+        .expression_attribute_values(":call_id", call_id.clone())
         .send()
         .await;
 
@@ -35,10 +39,14 @@ pub async fn get_messages_from_db(
                     Err(e) => eprintln!("Error parsing message: {:?}", e),
                 }
             }
+        } else {
+            println!("No messages found for call_id: {:?}", call_id);
         }
         for message in &messages {
-            println!("{}", message);
+            println!("Message: {}", message);
         }
+    } else {
+        eprintln!("Error querying database: {:?}", response.err().unwrap());
     }
 
     Ok(messages)
@@ -71,4 +79,49 @@ pub async fn generate_params_from_url(stream: &TcpStream) -> Result<(String, Str
         .map(|(_, v)| v)
         .unwrap_or_default();
     Ok((call_id.to_string(), owner.to_string()))
+}
+pub async fn send_chat_to_db(chat: Arc<CallChat>, client: Arc<Client>) -> Result<(), MessageError> {
+    let table_name = "Chats";
+    let call_id = chat.get_call_id().to_string();
+    let call_id_attr = AttributeValue::S(call_id.clone());
+    let chatter_attr = AttributeValue::S("agent".to_string());
+
+    // Check if chat exists
+    let query_req = client
+        .get_item()
+        .table_name(table_name)
+        .key("Chatter", chatter_attr.clone())
+        .key("CallID", call_id_attr.clone())
+        .send()
+        .await;
+
+    match query_req {
+        Ok(query_resp) => {
+            if query_resp.item.is_none() {
+                // Chat does not exist, insert it
+                let mut item = HashMap::new();
+                item.insert("CallID".to_string(), call_id_attr);
+                item.insert("Chatter".to_string(), chatter_attr);
+                let put_req = client
+                    .put_item()
+                    .table_name(table_name)
+                    .set_item(Some(item))
+                    .send()
+                    .await;
+
+                match put_req {
+                    Ok(_) => {
+                        println!("Chat created in database: {}", call_id);
+                        Ok(())
+                    }
+                    Err(e) => Err(MessageError::DatabaseError(e.into())),
+                }
+            } else {
+                // Chat already exists
+                println!("Chat already exists: {}", call_id);
+                Ok(())
+            }
+        }
+        Err(e) => Err(MessageError::DatabaseError(e.into())),
+    }
 }

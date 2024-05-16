@@ -1,16 +1,25 @@
+// src/main.rs
+use crate::copilot::CopilotMessage;
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_dynamodb::Client;
-use futures_util::{SinkExt, StreamExt};
-use messages::CallChat;
-use messages::{send_message_to_db, MessageType};
+use futures_util::SinkExt;
+use futures_util::StreamExt;
+use messages::{CallChat, MessageType};
+use std::collections::VecDeque;
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::tungstenite::{Error, Message as WsMessage};
+use tokio::sync::Mutex;
+use tokio::time::{self, Duration};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 
 mod agents;
 mod copilot;
 mod init;
 mod messages;
+
+const BUFFER_SIZE: usize = 10;
+const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() {
@@ -26,54 +35,130 @@ async fn main() {
     }
 }
 
-async fn handle_connection(stream: TcpStream, client: Client) {
+async fn handle_connection(stream: TcpStream, client: Client) -> tokio::task::JoinHandle<()> {
     let (call_id, owner) = match init::generate_params_from_url(&stream).await {
         Ok((call_id, owner)) => (call_id, owner),
         Err(e) => {
             eprintln!("Error parsing URL: {:?}", e);
-            return;
+            ("Err".to_string(), e.to_string())
         }
     };
+
+    // Create call on db if it doesn't exist
+    let mut chat = Arc::new(CallChat::new(call_id));
+    let client = Arc::new(client);
+
+    init::send_chat_to_db(chat.clone(), client.clone())
+        .await
+        .expect("Failed to send chat to database");
 
     let ws_stream = accept_async(stream)
         .await
         .expect("Failed to accept WebSocket connection");
 
-    let (mut write, mut read) = ws_stream.split();
+    let (mut write, read) = ws_stream.split();
+    let read = Arc::new(Mutex::new(read));
+    let buffer = Arc::new(Mutex::new(VecDeque::new()));
 
-    let mut conversation = CallChat::new(call_id.to_string());
-
-    let initial_messages: Vec<MessageType> =
-        init::get_messages_from_db(&client, call_id.to_string(), owner.to_string())
+    // Fetch initial messages and send to client
+    let initial_messages =
+        init::get_messages_from_db(&client, chat.get_call_id().to_string(), owner)
             .await
             .expect("Failed to get messages from db");
 
     for message in initial_messages {
         write
-            .send(Message::Text(message.get_value().to_string()))
+            .send(Message::Text(message.to_string()))
             .await
-            .expect("Failed to send message");
-        conversation.add_message(message);
+            .expect("Failed to send message to client");
     }
 
-    handle_messages(&mut read, &client, &call_id).await;
+    let read_clone = read.clone();
+    let buffer_clone = buffer.clone();
+
+    let chat_clone = chat.clone();
+    let client_clone = client.clone();
+    tokio::spawn(async move {
+        handle_messages(read_clone, buffer_clone, chat_clone, client_clone).await;
+    });
+
+    let chat_clone = chat.clone();
+    let client_clone = client.clone();
+    tokio::spawn(async move {
+        process_buffer(buffer, chat_clone, client_clone).await;
+    })
 }
 
 async fn handle_messages(
-    read: &mut (impl StreamExt<Item = Result<WsMessage, Error>> + Unpin),
-    client: &Client,
-    call_id: &str,
+    read: Arc<
+        Mutex<
+            impl StreamExt<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin,
+        >,
+    >,
+    buffer: Arc<Mutex<VecDeque<MessageType>>>,
+    chat: Arc<CallChat>,
+    client: Arc<Client>,
 ) {
+    let mut read = read.lock().await;
+
     while let Some(Ok(message)) = read.next().await {
         if let WsMessage::Text(text) = message {
             match serde_json::from_str::<MessageType>(&text) {
-                Ok(message) => {
-                    send_message_to_db(&client, message, &call_id)
-                        .await
-                        .expect("Failed to send message to db");
-                }
+                Ok(message_type) => match message_type {
+                    MessageType::User(user_msg) => {
+                        chat.send_message_to_db(&client, MessageType::User(user_msg))
+                            .await
+                            .expect("Failed to send user message to db");
+                    }
+                    MessageType::Copilot(copilot_msg) => {
+                        let mut buffer = buffer.lock().await;
+                        buffer.push_back(MessageType::Copilot(copilot_msg));
+                    }
+                },
                 Err(e) => eprintln!("Error parsing message: {:?}", e),
             }
         }
+    }
+}
+
+async fn process_buffer(
+    buffer: Arc<Mutex<VecDeque<MessageType>>>,
+    chat: Arc<CallChat>,
+    client: Arc<Client>,
+) {
+    loop {
+        let messages = {
+            let mut buffer = buffer.lock().await;
+            if !buffer.is_empty() {
+                Some(buffer.drain(..).collect::<Vec<_>>())
+            } else {
+                None
+            }
+        };
+
+        if let Some(messages) = messages {
+            let combined_message = messages
+                .iter()
+                .map(|msg| msg.get_value())
+                .collect::<Vec<_>>()
+                .join("");
+
+            let combined_copilot_message =
+                CopilotMessage::new("Combined".to_string(), combined_message);
+
+            handle_copilot_stream(chat.clone(), combined_copilot_message, &client).await;
+        }
+        time::sleep(TIMEOUT_DURATION).await;
+    }
+}
+async fn handle_copilot_stream(chat: Arc<CallChat>, copilot_msg: CopilotMessage, client: &Client) {
+    // Assume the copilot message contains a JSON array of messages
+    let messages: Vec<CopilotMessage> =
+        serde_json::from_str(&copilot_msg.get_message()).unwrap_or_else(|_| vec![copilot_msg]);
+
+    for message in messages {
+        chat.send_message_to_db(client, MessageType::Copilot(message))
+            .await
+            .expect("Failed to send copilot message to db");
     }
 }

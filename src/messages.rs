@@ -11,7 +11,7 @@ use crate::{
     copilot::CopilotMessage,
 };
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum MessageType {
     User(AgentMessage),
@@ -54,37 +54,8 @@ impl std::fmt::Display for MessageType {
     }
 }
 
-// METHODS FOR MESSAGES
-pub async fn send_message_to_db(
-    client: &Client,
-    message: MessageType,
-    call_id: &str,
-) -> Result<(), MessageError> {
-    match message.to_db_item(call_id) {
-        Ok(item) => {
-            let req = client
-                .put_item()
-                .table_name("Messages")
-                .set_item(Some(item))
-                .send()
-                .await;
-            match req {
-                Ok(_) => {
-                    println!("Message sent to database: {}", message);
-                    Ok(())
-                }
-                Err(e) => Err(MessageError::DatabaseError(e.into())),
-            }
-        }
-        Err(e) => {
-            eprintln!("Error converting message to DB item: {}", e);
-            Err(MessageError::ConversionError)
-        }
-    }
-}
-
 // CHAT INSTANCE
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CallChat {
     call_id: String,
     messages: Vec<MessageType>,
@@ -97,18 +68,22 @@ impl CallChat {
             messages: Vec::new(),
         }
     }
+
     /// Necessary getters
     pub fn get_call_id(&self) -> &str {
         &self.call_id
     }
+
     /// Add a message to the chat instance
     pub fn add_message(&mut self, message: MessageType) {
         self.messages.push(message);
     }
+
     /// Get all messages in the chat instance
     pub fn get_messages(&self) -> &Vec<MessageType> {
         &self.messages
     }
+
     /// Create a new message instance
     pub fn new_agent_message(
         &self,
@@ -120,13 +95,37 @@ impl CallChat {
     }
 
     /// Create a new copilot message instance
-    pub fn new_copilot_message(
+    pub fn new_copilot_message(&self, action: String, output: String) -> CopilotMessage {
+        CopilotMessage::new(action, output)
+    }
+
+    /// Send message to database
+    pub async fn send_message_to_db(
         &self,
-        message_id: UUID,
-        action: String,
-        output: String,
-    ) -> CopilotMessage {
-        CopilotMessage::new(message_id, action, output)
+        client: &Client,
+        message: MessageType,
+    ) -> Result<(), MessageError> {
+        match message.to_db_item(&self.call_id) {
+            Ok(item) => {
+                let req = client
+                    .put_item()
+                    .table_name("Messages")
+                    .set_item(Some(item))
+                    .send()
+                    .await;
+                match req {
+                    Ok(_) => {
+                        println!("Message sent to database: {}", message);
+                        Ok(())
+                    }
+                    Err(e) => Err(MessageError::DatabaseError(e.into())),
+                }
+            }
+            Err(e) => {
+                eprintln!("Error converting message to DB item: {}", e);
+                Err(MessageError::ConversionError)
+            }
+        }
     }
 }
 
