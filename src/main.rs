@@ -27,7 +27,7 @@ async fn main() {
     let config = aws_config::from_env().region(region_provider).load().await;
     let client = Client::new(&config);
 
-    let addr = "127.0.0.1:3030";
+    let addr = "0.0.0.0:3030";
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
 
     println!("Listening on: {}", addr);
