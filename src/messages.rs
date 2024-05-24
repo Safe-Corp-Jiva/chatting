@@ -1,17 +1,19 @@
-use aws_sdk_dynamodb::{types::AttributeValue, Client};
+use aws_sdk_dynamodb::{types::AttributeValue, Client, Error as DynamoError};
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, TimestampMilliSeconds};
+use std::{
+    collections::HashMap,
+    fmt,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use uuid::Uuid as UUID;
-
-use core::fmt;
-
-use aws_sdk_dynamodb::Error as DynamoError;
 
 use crate::{
     agents::{AgentMessage, DBItem},
     copilot::CopilotMessage,
 };
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum MessageType {
     User(AgentMessage),
@@ -43,10 +45,17 @@ impl MessageType {
             AgentMessage::from_db_item(item).map(MessageType::User)
         }
     }
+
+    pub fn get_timestamp(&self) -> SystemTime {
+        match self {
+            MessageType::User(message) => message.get_timestamp(),
+            MessageType::Copilot(message) => message.get_timestamp(),
+        }
+    }
 }
 
-impl std::fmt::Display for MessageType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for MessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MessageType::User(message) => write!(f, "{}", message),
             MessageType::Copilot(message) => write!(f, "{}", message),
@@ -138,8 +147,8 @@ impl Chat {
     }
 }
 
-impl std::fmt::Display for Chat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Chat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Chat ID: {}", self.chat_id)
     }
 }
