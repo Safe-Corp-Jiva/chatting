@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Context, Error, Result};
 use aws_sdk_dynamodb::Client;
+use connections::ConnectionType;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client as HttpClient;
+use state::ConnectionMetadata;
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
@@ -13,6 +15,7 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::{accept_async, tungstenite::Message as WsMessage};
 
 mod agents;
+mod connections;
 mod copilot;
 mod init;
 mod messages;
@@ -63,13 +66,25 @@ async fn main() {
     let addr = "0.0.0.0:3030";
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind 🤞");
 
+    let app_state = Arc::new(state::AppState::new());
+
     println!("Listening on: {}", addr);
 
     while let Ok((stream, _)) = listener.accept().await {
         let client = client.clone();
         let chat_manager = chat_manager.clone();
+        let copilot_endpoint_clone = copilot_endpoint.clone();
+        let app_state = app_state.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, client, chat_manager).await {
+            if let Err(e) = handle_connection(
+                app_state,
+                stream,
+                client,
+                chat_manager,
+                copilot_endpoint_clone,
+            )
+            .await
+            {
                 eprintln!("Error handling connection: {:?}", e);
             }
         });
@@ -77,9 +92,11 @@ async fn main() {
 }
 
 async fn handle_connection(
+    app_state: Arc<state::AppState>,
     stream: TcpStream,
     client: Client,
     chat_manager: Arc<ChatManager>,
+    copilot_endpoint: String,
 ) -> Result<(), Box<Error>> {
     let (agent_id, secondary_id) = match init::generate_params_from_url(&stream).await {
         Ok((agent_id, secondary_id)) => (agent_id, secondary_id),
@@ -90,7 +107,7 @@ async fn handle_connection(
     };
 
     let chat_id = format!("{}-{}", agent_id, secondary_id);
-    let chat = Arc::new(Chat::new(agent_id.clone(), secondary_id));
+    let chat = Arc::new(Chat::new(agent_id.clone(), secondary_id.clone()));
     let client = Arc::new(client);
 
     init::send_chat_to_db(chat.clone(), client.clone())
@@ -106,6 +123,13 @@ async fn handle_connection(
 
     let tx = chat_manager.get_or_create_chat(chat_id.clone()).await;
     let mut rx = tx.subscribe();
+
+    app_state
+        .add_connection(
+            agent_id.clone(),
+            ConnectionMetadata::new(&agent_id.clone(), &secondary_id.clone(), write.clone()),
+        )
+        .await;
 
     send_initial_messages(&client, &chat, write.clone()).await;
 
@@ -124,6 +148,7 @@ async fn handle_connection(
             chat_manager_clone,
             copilot_messages,
             tx,
+            copilot_endpoint,
         )
         .await
         {
@@ -168,6 +193,7 @@ async fn handle_messages<R, W>(
     chat_manager: Arc<ChatManager>,
     copilot_messages: Arc<Mutex<Vec<CopilotMessage>>>,
     tx: broadcast::Sender<WsMessage>,
+    copilot_endpoint: String,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     R: futures_util::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>>

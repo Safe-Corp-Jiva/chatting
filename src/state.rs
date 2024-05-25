@@ -7,10 +7,26 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
 
+use crate::connections::ConnectionType;
+
 type Tx = SplitSink<WebSocketStream<TcpStream>, WsMessage>;
 
-struct AppState {
-    connections: RwLock<HashMap<String, Arc<Mutex<Tx>>>>,
+pub struct ConnectionMetadata {
+    connection_type: ConnectionType,
+    write: Arc<Mutex<Tx>>,
+}
+
+impl ConnectionMetadata {
+    pub fn new(primary_id: &str, secondary_id: &str, write: Arc<Mutex<Tx>>) -> Self {
+        ConnectionMetadata {
+            connection_type: ConnectionType::instantiate_connection_type(primary_id, secondary_id),
+            write,
+        }
+    }
+}
+
+pub struct AppState {
+    connections: RwLock<HashMap<String, ConnectionMetadata>>,
 }
 
 impl AppState {
@@ -20,19 +36,20 @@ impl AppState {
         }
     }
 
-    async fn broadcast(&self, msg: &WsMessage) {
+    pub async fn broadcast(&self, msg: &WsMessage) {
         let connections = self.connections.read().await;
         for tx in connections.values() {
-            let mut tx_guard = tx.lock().await;
+            let mut tx_guard = tx.write.lock().await;
             if let Err(e) = tx_guard.send(msg.clone()).await {
                 eprintln!("Error broadcasting message: {:?}", e);
             }
         }
     }
 
-    async fn add_connection(&self, id: String, tx: Arc<Mutex<Tx>>) {
+    pub async fn add_connection(&self, id: String, connection_metadata: ConnectionMetadata) {
+        println!("New connection: {:?}", id);
         let mut connections = self.connections.write().await;
-        connections.insert(id, tx);
+        connections.insert(id, connection_metadata);
     }
 
     async fn remove_connection(&self, id: &str) {
