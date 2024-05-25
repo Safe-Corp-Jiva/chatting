@@ -1,6 +1,7 @@
 use crate::messages::Chat;
 use crate::messages::MessageError;
 use crate::messages::MessageType;
+use anyhow::Result;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::Client;
 use httparse::Request;
@@ -8,7 +9,6 @@ use httparse::EMPTY_HEADER;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use uuid::Uuid;
 
 use crate::messages;
 use url::Url;

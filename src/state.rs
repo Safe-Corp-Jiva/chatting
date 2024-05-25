@@ -1,13 +1,13 @@
 use futures_util::stream::SplitSink;
+use futures_util::SinkExt;
 use std::collections::HashMap;
-use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, RwLock};
-use tokio_tungstenite::tungstenite::protocol::Message;
+use std::sync::Arc;
+use tokio::net::TcpStream;
+use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::{accept_async, tungstenite::Message as WsMessage};
 
-type Tx = SplitSink<WebSocketStream<TcpStream>, Message>;
+type Tx = SplitSink<WebSocketStream<TcpStream>, WsMessage>;
 
 struct AppState {
     connections: RwLock<HashMap<String, Arc<Mutex<Tx>>>>,
@@ -20,11 +20,13 @@ impl AppState {
         }
     }
 
-    async fn broadcast(&self, msg: &Message) {
+    async fn broadcast(&self, msg: &WsMessage) {
         let connections = self.connections.read().await;
         for tx in connections.values() {
-            let mut tx = tx.lock().unwrap();
-            let _ = tx.send(msg.clone()).await;
+            let mut tx_guard = tx.lock().await;
+            if let Err(e) = tx_guard.send(msg.clone()).await {
+                eprintln!("Error broadcasting message: {:?}", e);
+            }
         }
     }
 
@@ -43,7 +45,7 @@ type TxCM = broadcast::Sender<WsMessage>;
 type Rx = broadcast::Receiver<WsMessage>;
 
 struct ChatManager {
-    chats: RwLock<HashMap<String, Tx>>,
+    chats: RwLock<HashMap<String, TxCM>>,
 }
 
 impl ChatManager {
