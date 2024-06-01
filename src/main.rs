@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Context, Error, Result};
 use aws_sdk_dynamodb::Client;
 use connections::ConnectionType;
+use copilot::CopilotSendMessage;
 use futures_util::stream::SplitSink;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
 use reqwest::Client as HttpClient;
 use state::ConnectionMetadata;
 use std::collections::HashMap;
@@ -71,28 +72,100 @@ async fn main() {
     println!("Listening on: {}", addr);
 
     while let Ok((stream, _)) = listener.accept().await {
-        let client = client.clone();
-        let chat_manager = chat_manager.clone();
-        let copilot_endpoint_clone = copilot_endpoint.clone();
-        let app_state = app_state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(
-                app_state,
-                stream,
-                client,
-                chat_manager,
-                copilot_endpoint_clone,
-            )
-            .await
-            {
-                eprintln!("Error handling connection: {:?}", e);
+        if let connection_type = ConnectionType::instantiate_connection_type(&stream).await {
+            match connection_type {
+                ConnectionType::Copilot(primary_id, secondary_id) => {
+                    app_state
+                        .add_connection(
+                            format!("{}-{}", primary_id, secondary_id),
+                            ConnectionMetadata::new(connection_type, write).await,
+                        )
+                        .await;
+                    let client = client.clone();
+                    let chat_manager = Arc::clone(&chat_manager);
+                    let copilot_endpoint = copilot_endpoint.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_copilot_connection(
+                            stream,
+                            client,
+                            chat_manager,
+                            copilot_endpoint,
+                        )
+                        .await
+                        {
+                            eprintln!("Error handling connection: {:?}", e);
+                        }
+                    });
+                }
+                ConnectionType::People(primary_id, secondary_id) => {
+                    app_state
+                        .add_connection(
+                            format!("{}-{}", primary_id, secondary_id),
+                            ConnectionMetadata::new(connection_type, stream).await,
+                        )
+                        .await;
+                    println!("Human connection");
+                    let client = client.clone();
+                    let chat_manager = Arc::clone(&chat_manager);
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_human_connection(stream, client, chat_manager).await
+                        {
+                            eprintln!("Error handling connection: {:?}", e);
+                        }
+                    });
+                }
             }
-        });
+        }
     }
 }
 
-async fn handle_connection(
-    app_state: Arc<state::AppState>,
+async fn handle_human_connection(
+    stream: TcpStream,
+    client: Client,
+    chat_manager: Arc<ChatManager>,
+) -> Result<(), Box<Error>> {
+    let (primary_id, secondary_id) = init::generate_params_from_url(&stream)
+        .await
+        .expect("Failed to generate params from URL");
+    let chat_id = format!("{}-{}", primary_id, secondary_id);
+    let chat = Arc::new(Chat::new(primary_id.clone(), secondary_id.clone()));
+    let client = Arc::new(client);
+
+    init::send_chat_to_db(chat.clone(), client.clone())
+        .await
+        .expect("Failed to send chat to db");
+
+    let ws_stream = accept_async(stream)
+        .await
+        .context("Failed to accept async stream")?;
+
+    let (write, read) = ws_stream.split();
+
+    let write = Arc::new(Mutex::new(write));
+    let read = Arc::new(Mutex::new(read));
+
+    let tx = chat_manager.get_or_create_chat(chat_id.clone()).await;
+    let mut rx = tx.subscribe();
+
+    send_initial_messages(&client, &chat, write.clone()).await;
+
+    tokio::spawn(async move {
+        if let Err(e) = handle_human_messages::<SplitSink<WebSocketStream<TcpStream>, WsMessage>>(
+            read.clone(),
+            chat.clone(),
+            client.clone(),
+            tx,
+        )
+        .await
+        {
+            eprintln!("Error handling messages: {:?}", e);
+        }
+    });
+
+    Ok(())
+}
+
+async fn handle_copilot_connection(
     stream: TcpStream,
     client: Client,
     chat_manager: Arc<ChatManager>,
@@ -117,19 +190,13 @@ async fn handle_connection(
     let ws_stream = accept_async(stream)
         .await
         .context("Failed to accept async stream")?;
+
     let (write, read) = ws_stream.split();
     let write = Arc::new(Mutex::new(write));
     let read = Arc::new(Mutex::new(read));
 
     let tx = chat_manager.get_or_create_chat(chat_id.clone()).await;
     let mut rx = tx.subscribe();
-
-    app_state
-        .add_connection(
-            agent_id.clone(),
-            ConnectionMetadata::new(&agent_id.clone(), &secondary_id.clone(), write.clone()),
-        )
-        .await;
 
     send_initial_messages(&client, &chat, write.clone()).await;
 
@@ -138,17 +205,14 @@ async fn handle_connection(
     let client_clone = client.clone();
     let chat_manager_clone = chat_manager.clone();
 
-    let copilot_messages = Arc::new(Mutex::new(Vec::new()));
-
     tokio::spawn(async move {
-        if let Err(e) = handle_messages::<_, SplitSink<WebSocketStream<TcpStream>, WsMessage>>(
+        if let Err(e) = handle_copilot_messages::<SplitSink<WebSocketStream<TcpStream>, WsMessage>>(
             read_clone,
             chat_clone,
             client_clone,
             chat_manager_clone,
-            copilot_messages,
-            tx,
             copilot_endpoint,
+            tx,
         )
         .await
         {
@@ -186,62 +250,67 @@ where
     }
 }
 
-async fn handle_messages<R, W>(
-    read: Arc<Mutex<R>>,
+async fn handle_human_messages<W>(
+    read: Arc<
+        Mutex<impl Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin>,
+    >,
     chat: Arc<Chat>,
     client: Arc<Client>,
-    chat_manager: Arc<ChatManager>,
-    copilot_messages: Arc<Mutex<Vec<CopilotMessage>>>,
     tx: broadcast::Sender<WsMessage>,
-    copilot_endpoint: String,
-) -> Result<(), Box<dyn std::error::Error>>
-where
-    R: futures_util::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>>
-        + Unpin,
-    W: futures_util::Sink<WsMessage> + Unpin + Send + 'static,
-    <W as futures_util::Sink<WsMessage>>::Error: Debug,
-{
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut read = read.lock().await;
-
     while let Some(Ok(message)) = read.next().await {
-        if let WsMessage::Text(text) = message {
-            match serde_json::from_str::<MessageType>(&text) {
-                Ok(message_type) => match message_type {
-                    MessageType::User(ref user_msg) => {
-                        handle_user_message(&chat, &client, user_msg.clone()).await;
-                        let message_json = serde_json::json!(message_type).to_string();
-                        if let Err(e) = tx.send(WsMessage::Text(message_json)) {
-                            eprintln!("Error broadcasting user message: {:?}", e);
-                        }
-                        send_post_request_and_stream_response(
-                            chat.clone(),
-                            user_msg.clone(),
-                            chat_manager.clone(),
-                        )
-                        .await;
-                    }
-                    MessageType::Copilot(ref copilot_msg) => {
-                        handle_copilot_message(
-                            copilot_msg.clone(),
-                            &copilot_messages,
-                            &chat,
-                            &client,
-                        )
-                        .await;
-                        let message_json = serde_json::json!(message_type).to_string();
-                        if let Err(e) = tx.send(WsMessage::Text(message_json)) {
-                            eprintln!("Error broadcasting copilot message: {:?}", e);
-                        }
-                    }
-                },
-                Err(e) => eprintln!("Error parsing message: {:?}", e),
-            }
+        let message_to_send = serde_json::from_str::<AgentMessage>(&message.to_string())
+            .expect("Failed to parse message");
+        handle_user_message(&chat, &client, message_to_send.clone()).await;
+        let message_json = serde_json::json!(message_to_send).to_string();
+        if let Err(e) = tx.send(WsMessage::Text(message_json)) {
+            eprintln!("Error broadcasting user message: {:?}", e);
         }
     }
-
     Ok(())
 }
 
+async fn handle_copilot_messages<W>(
+    read: Arc<
+        Mutex<impl Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin>,
+    >,
+    chat: Arc<Chat>,
+    client: Arc<Client>,
+    chat_manager: Arc<ChatManager>,
+    copilot_endpoint: String,
+    tx: broadcast::Sender<WsMessage>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut read = read.lock().await;
+    while let Some(Ok(message)) = read.next().await {
+        match serde_json::from_str::<MessageType>(&message.to_string()) {
+            Ok(message_type) => {
+                if let MessageType::User(ref user_msg) = message_type {
+                    handle_user_message(&chat, &client, user_msg.clone()).await;
+                    let copilot_send_message =
+                        CopilotSendMessage::from_agent_message(user_msg.clone(), chat.clone());
+                    send_post_request_and_stream_response(
+                        chat.clone(),
+                        copilot_send_message,
+                        chat_manager.clone(),
+                        copilot_endpoint.clone(),
+                    );
+                    let message_json = serde_json::json!(message_type).to_string();
+                    if let Err(e) = tx.send(WsMessage::Text(message_json)) {
+                        eprintln!("Error broadcasting user message: {:?}", e);
+                    }
+                } else {
+                    let message_json = serde_json::json!(message_type).to_string();
+                    if let Err(e) = tx.send(WsMessage::Text(message_json)) {
+                        eprintln!("Error broadcasting copilot message: {:?}", e);
+                    }
+                }
+            }
+            Err(e) => eprintln!("Error parsing message: {:?}", e),
+        }
+    }
+    Ok(())
+}
 async fn handle_user_message(chat: &Arc<Chat>, client: &Arc<Client>, user_msg: AgentMessage) {
     if let Err(e) = chat
         .send_message_to_db(client, MessageType::User(user_msg))
@@ -251,96 +320,45 @@ async fn handle_user_message(chat: &Arc<Chat>, client: &Arc<Client>, user_msg: A
     }
 }
 
-async fn handle_copilot_message(
-    copilot_msg: CopilotMessage,
-    copilot_messages: &Arc<Mutex<Vec<CopilotMessage>>>,
-    chat: &Arc<Chat>,
-    client: &Arc<Client>,
-) {
-    let mut messages = copilot_messages.lock().await;
-    messages.push(copilot_msg);
-
-    let copilot_messages_clone = Arc::clone(&copilot_messages);
-    let chat_clone = Arc::clone(&chat);
-    let client_clone = Arc::clone(&client);
-
-    tokio::spawn(async move {
-        tokio::time::sleep(TIMEOUT_DURATION).await;
-        process_copilot_messages(copilot_messages_clone, chat_clone, client_clone).await;
-    });
-}
-
-async fn process_copilot_messages(
-    copilot_messages: Arc<Mutex<Vec<CopilotMessage>>>,
-    chat: Arc<Chat>,
-    client: Arc<Client>,
-) {
-    let combined_message = {
-        let mut messages = copilot_messages.lock().await;
-        if messages.is_empty() {
-            return;
-        }
-
-        messages.sort_by_key(|msg| msg.get_timestamp());
-
-        let combined_message = messages
-            .drain(..)
-            .map(|msg| msg.get_message().to_string())
-            .collect::<Vec<_>>()
-            .join("");
-
-        combined_message
-    };
-
-    let combined_copilot_message = CopilotMessage::new("Combined".to_string(), combined_message);
-
-    if let Err(e) = chat
-        .send_message_to_db(&client, MessageType::Copilot(combined_copilot_message))
-        .await
-    {
-        eprintln!("Failed to send copilot message to db: {:?}", e);
-    }
-}
-
 async fn send_post_request_and_stream_response(
     chat: Arc<Chat>,
-    user_msg: AgentMessage,
+    user_msg: CopilotSendMessage,
     chat_manager: Arc<ChatManager>,
+    copilot_endpoint: String,
 ) {
-    // Define the URL and create an HTTP client
-    let url = "http://your-copilot-service/endpoint";
+    let url = copilot_endpoint;
     let client = HttpClient::new();
-
-    // Send POST request
     let response = client
         .post(url)
         .json(&user_msg)
         .send()
         .await
         .expect("Failed to send POST request");
-
-    // Handle the streaming response
     let mut stream = response.bytes_stream();
+    let mut buffer = Vec::new();
 
     while let Some(item) = stream.next().await {
         match item {
             Ok(chunk) => {
-                let copilot_message: CopilotMessage =
-                    serde_json::from_slice(&chunk).expect("Failed to parse CopilotMessage");
-
-                // Here you would broadcast the message to WebSocket clients
-                // For example, using a broadcast channel in the ChatManager
-
                 let tx = chat_manager
                     .get_or_create_chat(chat.get_chat_id().to_string())
                     .await;
-                let message_json =
-                    serde_json::json!(MessageType::Copilot(copilot_message)).to_string();
-                if let Err(e) = tx.send(WsMessage::Text(message_json)) {
-                    eprintln!(
-                        "Error broadcasting copilot message from POST response: {:?}",
-                        e
-                    );
+                let message_text =
+                    String::from_utf8(chunk.to_vec()).unwrap_or_else(|_| "Binary data".to_string());
+                if let Err(e) = tx.send(WsMessage::Text(message_text.clone())) {
+                    eprintln!("Error broadcasting raw copilot message: {:?}", e);
+                }
+
+                buffer.extend(chunk);
+
+                if buffer.len() > 1024 {
+                    match serde_json::from_slice::<CopilotMessage>(&buffer) {
+                        Ok(parsed_message) => {
+                            println!("Parsed Message: {:?}", parsed_message);
+                            buffer.clear();
+                        }
+                        Err(_) => {}
+                    }
                 }
             }
             Err(e) => eprintln!("Error reading stream response: {:?}", e),

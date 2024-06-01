@@ -58,6 +58,6 @@ Alternatively, you can configure these in the `~/.aws/credentials` and `~/.aws/c
 
 Once the server is running, connect to the WebSocket endpoint using any WebSocket client on `ws://localhost:3030`. Ensure you include query parameters for `call_id` and `owner` when establishing a connection, for example:
 ```
-ws://localhost:3030?call_id=test_call&owner=user123
+ws://localhost:3030?primaryID={agent_id}&secondaryID={supervisor_id | "copilot"}
 ```
 

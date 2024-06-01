@@ -1,14 +1,26 @@
+use tokio::net::TcpStream;
+
+use crate::init;
+
 pub enum ConnectionType {
-    Copilot(String),
+    Copilot(String, String),
     People(String, String),
 }
 
 impl ConnectionType {
-    pub fn instantiate_connection_type(primary_id: &str, secondary_id: &str) -> ConnectionType {
-        if let "copilot" = secondary_id {
-            ConnectionType::Copilot(String::from(secondary_id))
-        } else {
-            ConnectionType::People(String::from(primary_id), String::from(secondary_id))
+    pub async fn instantiate_connection_type(stream: &TcpStream) -> ConnectionType {
+        match init::generate_params_from_url(stream).await {
+            Ok((primary_id, secondary_id)) => {
+                if secondary_id == "copilot" {
+                    ConnectionType::Copilot(primary_id, secondary_id)
+                } else {
+                    ConnectionType::People(primary_id, secondary_id)
+                }
+            }
+            Err(_) => {
+                eprintln!("Error getting stream type");
+                ConnectionType::People("".to_string(), "".to_string())
+            }
         }
     }
 }

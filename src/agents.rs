@@ -37,7 +37,7 @@ pub struct AgentMessage {
         serialize_with = "default_serialize_uuid"
     )]
     message_id: UUID,
-    call_id: String,
+    chat_id: String,
     sender: String,
     message: String,
     #[serde(default = "current_time", deserialize_with = "deserialize_timestamp")]
@@ -51,7 +51,7 @@ impl fmt::Display for AgentMessage {
         write!(
             f,
             "Message ID: {}, Call ID: {}, Sender: {}, Message: {}, Timestamp: {:?}",
-            self.message_id, self.call_id, self.sender, self.message, self.timestamp
+            self.message_id, self.chat_id, self.sender, self.message, self.timestamp
         )
     }
 }
@@ -63,10 +63,10 @@ impl Into<Message> for AgentMessage {
 }
 
 impl AgentMessage {
-    pub fn new(message_id: UUID, call_id: String, sender: String, message: String) -> Self {
+    pub fn new(message_id: UUID, chat_id: String, sender: String, message: String) -> Self {
         Self {
             message_id,
-            call_id,
+            chat_id,
             sender,
             message,
             timestamp: SystemTime::now(),
@@ -79,8 +79,8 @@ impl AgentMessage {
             .and_then(|v| v.as_s().ok())
             .ok_or_else(|| MessageError::InvalidAttribute("MessageID".to_string()))?;
 
-        let call_id = item
-            .get("CallID")
+        let chat_id = item
+            .get("ChatID")
             .and_then(|v| v.as_s().ok())
             .ok_or_else(|| MessageError::InvalidAttribute("CallID".to_string()))?;
 
@@ -103,26 +103,26 @@ impl AgentMessage {
 
         Ok(Self {
             message_id: UUID::parse_str(message_id).unwrap(),
-            call_id: call_id.to_string(),
+            chat_id: chat_id.to_string(),
             sender: sender.to_string(),
             message: message.to_string(),
             timestamp,
         })
     }
 
-    pub fn get_message_id(&self) -> String {
-        self.message_id.to_string()
+    pub fn get_message_id(&self) -> UUID {
+        self.message_id
     }
 
-    pub fn get_call_id(&self) -> &str {
-        &self.call_id
+    pub fn get_chat_id(&self) -> &str {
+        &self.chat_id
     }
 
     pub fn get_value(&self) -> &str {
         &self.message
     }
 
-    pub fn get_owner(&self) -> &str {
+    pub fn get_sender(&self) -> &str {
         &self.sender
     }
 
@@ -135,7 +135,7 @@ impl AgentMessage {
         );
         item.insert(
             "CallID".to_string(),
-            AttributeValue::S(self.call_id.clone()),
+            AttributeValue::S(self.chat_id.clone()),
         );
         item.insert(
             "Message".to_string(),

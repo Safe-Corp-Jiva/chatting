@@ -1,12 +1,15 @@
 use core::fmt;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aws_sdk_dynamodb::types::AttributeValue;
-use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, TimestampMilliSeconds};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_with::serde_as;
 use uuid::Uuid as UUID;
 
+use crate::agents::AgentMessage;
+use crate::messages::{Chat, ChatMessage};
 use crate::{agents::DBItem, messages::MessageError};
 
 fn default_sender() -> String {
@@ -24,11 +27,36 @@ fn current_time() -> SystemTime {
     SystemTime::now()
 }
 
-fn deserialize_timestamp<'de, D>(deserilizer: D) -> Result<SystemTime, D::Error>
+fn deserialize_timestamp<'de, D>(_deserilizer: D) -> Result<SystemTime, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     Ok(SystemTime::now())
+}
+
+#[serde_as]
+#[derive(Serialize, Debug, Clone)]
+pub struct CopilotSendMessage {
+    input: String,
+    chat_history: Vec<ChatMessage>,
+}
+
+impl CopilotSendMessage {
+    pub fn new(input: String) -> Self {
+        CopilotSendMessage {
+            input,
+            chat_history: Vec::new(),
+        }
+    }
+
+    pub fn from_agent_message(message: AgentMessage, chat: Arc<Chat>) -> Self {
+        let input = message.get_value().to_string();
+        let chat_history = chat.get_chat_history();
+        CopilotSendMessage {
+            input,
+            chat_history,
+        }
+    }
 }
 
 #[serde_as]
@@ -40,12 +68,24 @@ pub struct CopilotMessage {
         serialize_with = "default_serialize_uuid"
     )]
     message_id: UUID,
+    #[serde(deserialize_with = "parse_defaults")]
     action: String,
+    #[serde(deserialize_with = "parse_defaults")]
     output: String,
     #[serde(default = "default_sender", skip_deserializing)]
     sender: String,
     #[serde(default = "current_time", deserialize_with = "deserialize_timestamp")]
     timestamp: SystemTime,
+}
+
+fn parse_defaults<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Deserialize::deserialize(d).map(|x: Option<String>| {
+        println!("x: {:?}", x);
+        x.unwrap_or_default()
+    })
 }
 
 impl fmt::Display for CopilotMessage {
@@ -138,5 +178,9 @@ impl CopilotMessage {
 
     pub fn get_timestamp(&self) -> SystemTime {
         self.timestamp
+    }
+
+    pub fn get_message_id(&self) -> UUID {
+        self.message_id
     }
 }

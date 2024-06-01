@@ -17,9 +17,9 @@ pub struct ConnectionMetadata {
 }
 
 impl ConnectionMetadata {
-    pub fn new(primary_id: &str, secondary_id: &str, write: Arc<Mutex<Tx>>) -> Self {
+    pub async fn new(connection_type: ConnectionType, write: Arc<Mutex<Tx>>) -> Self {
         ConnectionMetadata {
-            connection_type: ConnectionType::instantiate_connection_type(primary_id, secondary_id),
+            connection_type,
             write,
         }
     }

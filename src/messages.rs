@@ -28,13 +28,13 @@ impl MessageType {
         }
     }
 
-    pub fn to_db_item(&self, call_id: &str) -> Result<DBItem, MessageError> {
+    pub fn to_db_item(&self, chat_id: &str) -> Result<DBItem, MessageError> {
         let mut item = match self {
             MessageType::User(message) => message.to_db_item(),
             MessageType::Copilot(message) => message.to_db_item(),
         }
         .unwrap();
-        item.insert("CallID".to_string(), AttributeValue::S(call_id.to_string()));
+        item.insert("ChatID".to_string(), AttributeValue::S(chat_id.to_string()));
         Ok(item)
     }
 
@@ -43,6 +43,21 @@ impl MessageType {
             CopilotMessage::from_db_item(item).map(MessageType::Copilot)
         } else {
             AgentMessage::from_db_item(item).map(MessageType::User)
+        }
+    }
+
+    pub fn to_chat_message(&self, chat_id: String) -> ChatMessage {
+        match self {
+            MessageType::User(message) => ChatMessage::new(
+                chat_id,
+                message.get_sender().to_string(),
+                message.get_value().to_string(),
+            ),
+            MessageType::Copilot(message) => ChatMessage::new(
+                chat_id,
+                "Copilot".to_string(),
+                message.get_message().to_string(),
+            ),
         }
     }
 
@@ -63,11 +78,28 @@ impl fmt::Display for MessageType {
     }
 }
 
+#[derive(Serialize, Debug, Clone)]
+pub struct ChatMessage {
+    chat_id: String,
+    message: String,
+    sender: String,
+}
+
+impl ChatMessage {
+    pub fn new(chat_id: String, message: String, sender: String) -> Self {
+        Self {
+            chat_id,
+            message,
+            sender,
+        }
+    }
+}
+
 // CHAT INSTANCE
 #[derive(Debug, Clone)]
 pub struct Chat {
     chat_id: String,
-    messages: Vec<MessageType>,
+    messages: Vec<ChatMessage>,
 }
 
 impl Chat {
@@ -77,6 +109,10 @@ impl Chat {
             chat_id,
             messages: Vec::new(),
         }
+    }
+
+    pub fn get_chat_history(&self) -> Vec<ChatMessage> {
+        self.messages.clone()
     }
 
     /// Necessary getters
@@ -94,12 +130,8 @@ impl Chat {
 
     /// Add a message to the chat instance
     pub fn add_message(&mut self, message: MessageType) {
-        self.messages.push(message);
-    }
-
-    /// Get all messages in the chat instance
-    pub fn get_messages(&self) -> &Vec<MessageType> {
-        &self.messages
+        let message_to_push = message.to_chat_message(self.get_chat_id());
+        self.messages.push(message_to_push)
     }
 
     /// Create a new message instance
@@ -180,4 +212,13 @@ impl std::error::Error for MessageError {
             _ => None,
         }
     }
+}
+
+pub fn handle_copilot_messages(
+    message: MessageType,
+    chat: &mut Chat,
+    client: &Client,
+) -> Result<(), MessageError> {
+    chat.add_message(message.clone());
+    chat.send_message_to_db(client, message)
 }
