@@ -37,6 +37,7 @@ pub struct AgentMessage {
         serialize_with = "default_serialize_uuid"
     )]
     message_id: UUID,
+    #[serde(skip)]
     chat_id: String,
     sender: String,
     message: String,
@@ -50,7 +51,7 @@ impl fmt::Display for AgentMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Message ID: {}, Call ID: {}, Sender: {}, Message: {}, Timestamp: {:?}",
+            "Message ID: {}, Chat ID: {}, Sender: {}, Message: {}, Timestamp: {:?}",
             self.message_id, self.chat_id, self.sender, self.message, self.timestamp
         )
     }
@@ -134,7 +135,7 @@ impl AgentMessage {
             AttributeValue::S(self.message_id.to_string()),
         );
         item.insert(
-            "CallID".to_string(),
+            "ChatID".to_string(),
             AttributeValue::S(self.chat_id.clone()),
         );
         item.insert(

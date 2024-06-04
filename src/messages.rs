@@ -1,16 +1,11 @@
 use aws_sdk_dynamodb::{types::AttributeValue, Client, Error as DynamoError};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, TimestampMilliSeconds};
-use std::{
-    collections::HashMap,
-    fmt,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{fmt, time::SystemTime};
 use uuid::Uuid as UUID;
 
 use crate::{
     agents::{AgentMessage, DBItem},
-    copilot::CopilotMessage,
+    copilot::{CopilotChunk, CopilotMessage},
 };
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -145,8 +140,8 @@ impl Chat {
     }
 
     /// Create a new copilot message instance
-    pub fn new_copilot_message(&self, action: String, output: String) -> CopilotMessage {
-        CopilotMessage::new(action, output)
+    pub fn new_copilot_message(&self, chunks: Vec<CopilotChunk>) -> CopilotMessage {
+        CopilotMessage::new(chunks)
     }
 
     /// Send message to database
@@ -214,11 +209,11 @@ impl std::error::Error for MessageError {
     }
 }
 
-pub fn handle_copilot_messages(
+pub async fn handle_copilot_messages(
     message: MessageType,
     chat: &mut Chat,
     client: &Client,
 ) -> Result<(), MessageError> {
     chat.add_message(message.clone());
-    chat.send_message_to_db(client, message)
+    chat.send_message_to_db(client, message).await
 }

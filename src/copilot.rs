@@ -49,7 +49,7 @@ impl CopilotSendMessage {
         }
     }
 
-    pub fn from_agent_message(message: AgentMessage, chat: Arc<Chat>) -> Self {
+    pub fn from_agent_message(message: AgentMessage, chat: &mut Chat) -> Self {
         let input = message.get_value().to_string();
         let chat_history = chat.get_chat_history();
         CopilotSendMessage {
@@ -57,6 +57,21 @@ impl CopilotSendMessage {
             chat_history,
         }
     }
+}
+
+#[serde_as]
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct CopilotChunk {
+    action: Option<String>,
+    #[serde(default, deserialize_with = "delete_newlines")]
+    output: Option<String>,
+}
+
+fn delete_newlines<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Deserialize::deserialize(d).map(|x: Option<String>| x.map(|s| s.replace('\n', "")))
 }
 
 #[serde_as]
@@ -99,7 +114,14 @@ impl fmt::Display for CopilotMessage {
 }
 
 impl CopilotMessage {
-    pub fn new(action: String, output: String) -> Self {
+    pub fn new(chunks: Vec<CopilotChunk>) -> Self {
+        let mut output = String::new();
+        let action = "Combined".to_string();
+        for chunk in chunks {
+            if let Some(chunk_output) = chunk.output {
+                output.push_str(&chunk_output);
+            }
+        }
         Self {
             message_id: UUID::new_v4(),
             action,

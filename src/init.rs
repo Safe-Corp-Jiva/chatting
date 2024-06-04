@@ -24,7 +24,7 @@ pub async fn get_messages_from_db(
     let response = client
         .scan()
         .table_name("Messages")
-        .filter_expression("CallID = :chat_id")
+        .filter_expression("ChatID = :chat_id")
         .expression_attribute_values(":chat_id", chat_id.clone())
         .send()
         .await;
@@ -80,13 +80,12 @@ pub async fn generate_params_from_url(stream: &TcpStream) -> Result<(String, Str
     Ok((chat_id.to_string(), owner.to_string()))
 }
 
-pub async fn send_chat_to_db(chat: Arc<Chat>, client: Arc<Client>) -> Result<(), MessageError> {
+pub async fn send_chat_to_db(chat: Chat, client: Arc<Client>) -> Result<(), MessageError> {
     let table_name = "Chats";
     let chat_id = chat.get_chat_id().to_string();
     let agent_id = chat.get_agent_id().to_string();
     let secondary_id = chat.get_secondary_id().to_string();
 
-    // Check if chat exists
     let query_req = client
         .get_item()
         .table_name(table_name)
@@ -126,18 +125,5 @@ pub async fn send_chat_to_db(chat: Arc<Chat>, client: Arc<Client>) -> Result<(),
             }
         }
         Err(e) => Err(MessageError::DatabaseError(e.into())),
-    }
-}
-
-pub async fn get_connection_type(stream: &TcpStream) -> Option<String> {
-    if let Ok((_, secondaryID)) = generate_params_from_url(stream).await {
-        if secondaryID == "copilot" {
-            Some("copilot".to_string())
-        } else {
-            Some("agent".to_string())
-        }
-    } else {
-        eprintln!("Error getting stream type");
-        None
     }
 }

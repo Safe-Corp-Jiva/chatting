@@ -13,8 +13,10 @@ impl ConnectionType {
             Ok((primary_id, secondary_id)) => {
                 if secondary_id == "copilot" {
                     ConnectionType::Copilot(primary_id, secondary_id)
-                } else {
+                } else if secondary_id == "supervisor" {
                     ConnectionType::People(primary_id, secondary_id)
+                } else {
+                    ConnectionType::People("".to_string(), "".to_string())
                 }
             }
             Err(_) => {
