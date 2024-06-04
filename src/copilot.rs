@@ -1,6 +1,5 @@
 use core::fmt;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aws_sdk_dynamodb::types::AttributeValue;
@@ -72,6 +71,15 @@ where
     D: Deserializer<'de>,
 {
     Deserialize::deserialize(d).map(|x: Option<String>| x.map(|s| s.replace('\n', "")))
+}
+
+impl CopilotChunk {
+    pub fn new(action: String, output: String) -> Self {
+        Self {
+            action: Some(action),
+            output: Some(output),
+        }
+    }
 }
 
 #[serde_as]

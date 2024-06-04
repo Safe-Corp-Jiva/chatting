@@ -8,6 +8,7 @@ aws-config = { version= "1.4.0", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1.28.0"
 anyhow = "1.0"
 reqwest = {version = "0.11",features = ["json", "stream"]}
+regex = "0.1.1"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
 futures-util = "0.3"

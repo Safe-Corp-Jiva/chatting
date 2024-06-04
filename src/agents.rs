@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, TimestampMilliSeconds};
+use serde_with::serde_as;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{collections::HashMap, fmt};
 
@@ -37,7 +37,6 @@ pub struct AgentMessage {
         serialize_with = "default_serialize_uuid"
     )]
     message_id: UUID,
-    #[serde(skip)]
     chat_id: String,
     sender: String,
     message: String,
@@ -117,6 +116,10 @@ impl AgentMessage {
 
     pub fn get_chat_id(&self) -> &str {
         &self.chat_id
+    }
+
+    pub fn set_chat_id(&mut self, chat_id: String) {
+        self.chat_id = chat_id;
     }
 
     pub fn get_value(&self) -> &str {

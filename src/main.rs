@@ -5,8 +5,8 @@ use connections::ConnectionType;
 use copilot::{CopilotChunk, CopilotSendMessage};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, Stream, StreamExt};
+use regex::Regex;
 use reqwest::Client as HttpClient;
-use serde_json::Deserializer;
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
@@ -101,7 +101,7 @@ async fn handle_human_connection(
         .await
         .expect("Failed to generate params from URL");
     let chat_id = format!("{}-{}", primary_id, secondary_id);
-    let mut chat = Chat::new(primary_id, secondary_id);
+    let mut chat = Chat::new(primary_id.clone(), secondary_id.clone());
     let client = Arc::new(client);
 
     init::send_chat_to_db(chat.clone(), client.clone())
@@ -118,7 +118,7 @@ async fn handle_human_connection(
     let read = Arc::new(Mutex::new(read));
 
     let tx = chat_manager.get_or_create_chat(chat_id.clone()).await;
-    let _rx = tx.subscribe();
+    let mut rx = tx.subscribe();
 
     send_initial_messages(&client, &chat, write.clone()).await;
 
@@ -132,6 +132,15 @@ async fn handle_human_connection(
         .await
         {
             eprintln!("Error handling messages: {:?}", e);
+        }
+    });
+
+    tokio::spawn(async move {
+        while let Ok(message) = rx.recv().await {
+            let mut write = write.lock().await;
+            if let Err(e) = write.send(message.clone()).await {
+                eprintln!("Error sending message to client: {:?}", e);
+            }
         }
     });
 
@@ -311,15 +320,20 @@ async fn send_post_request_and_stream_response(
         .send()
         .await
         .expect("Failed to send POST request");
+
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
+    let tx = chat_manager
+        .get_or_create_chat(chat.get_chat_id().to_string())
+        .await;
 
     while let Some(item) = stream.next().await {
         match item {
             Ok(chunk) => {
-                let tx = chat_manager
-                    .get_or_create_chat(chat.get_chat_id().to_string())
-                    .await;
+                let re = Regex::new(r"\{").unwrap();
+                let chunks = re
+                    .split(std::str::from_utf8(&chunk).unwrap())
+                    .collect::<Vec<&str>>();
 
                 let message_text =
                     String::from_utf8(chunk.to_vec()).unwrap_or_else(|_| "Binary data".to_string());
@@ -328,9 +342,11 @@ async fn send_post_request_and_stream_response(
                     eprintln!("Error broadcasting raw copilot message: {:?}", e);
                 }
 
-                let copilot_chunk = serde_json::from_slice::<CopilotChunk>(&chunk)
-                    .expect("Failed to parse copilot chunk");
-                buffer.push(copilot_chunk);
+                for chunk in chunks {
+                    let copilot_chunk = serde_json::from_str::<CopilotChunk>(chunk)
+                        .expect("Failed to parse copilot chunk");
+                    buffer.push(copilot_chunk);
+                }
             }
             Err(e) => eprintln!("Error reading stream response: {:?}", e),
         }
@@ -339,9 +355,18 @@ async fn send_post_request_and_stream_response(
     let copilot_message = CopilotMessage::new(buffer);
     chat.add_message(MessageType::Copilot(copilot_message.clone()));
     if let Err(e) = chat
-        .send_message_to_db(&client, MessageType::Copilot(copilot_message))
+        .send_message_to_db(&client, MessageType::Copilot(copilot_message.clone()))
         .await
     {
         eprintln!("Failed to send copilot message to db: {:?}", e);
+    }
+    let message_text = serde_json::json!(copilot_message).to_string();
+    if let Err(e) = tx.send(WsMessage::Text(message_text)) {
+        eprintln!("Error broadcasting copilot message: {:?}", e);
+    }
+    let initial_json = serde_json::json!({  "action": "end",  "output": ""});
+
+    if let Err(e) = tx.send(WsMessage::Text(initial_json.to_string())) {
+        eprintln!("Error broadcasting initial copilot message: {:?}", e);
     }
 }
