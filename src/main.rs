@@ -60,6 +60,8 @@ async fn main() {
     let copilot_endpoint =
         env::var("COPILOT_ENDPOINT").expect("Could not load Copilot endpoint 🤖");
 
+    println!("Copilot endpoint: {:?}", copilot_endpoint);
+
     let addr = "0.0.0.0:3030";
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind 🤞");
 
