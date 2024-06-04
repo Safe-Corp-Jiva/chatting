@@ -330,19 +330,18 @@ async fn send_post_request_and_stream_response(
     while let Some(item) = stream.next().await {
         match item {
             Ok(chunk) => {
-                let re = Regex::new(r"\{").unwrap();
-                let chunks = re
-                    .split(std::str::from_utf8(&chunk).unwrap())
-                    .collect::<Vec<&str>>();
-
-                let message_text =
-                    String::from_utf8(chunk.to_vec()).unwrap_or_else(|_| "Binary data".to_string());
-
-                if let Err(e) = tx.send(WsMessage::Text(message_text.clone())) {
-                    eprintln!("Error broadcasting raw copilot message: {:?}", e);
-                }
+                println!("Received chunk: {:?}", chunk);
+                let chunks = std::str::from_utf8(&chunk)
+                    .unwrap()
+                    .split_inclusive('}')
+                    .collect::<Vec<_>>();
 
                 for chunk in chunks {
+                    let message_text = chunk;
+
+                    if let Err(e) = tx.send(WsMessage::Text(message_text.to_string())) {
+                        eprintln!("Error broadcasting raw copilot message: {:?}", e);
+                    }
                     let copilot_chunk = serde_json::from_str::<CopilotChunk>(chunk)
                         .expect("Failed to parse copilot chunk");
                     buffer.push(copilot_chunk);
