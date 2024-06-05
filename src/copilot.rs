@@ -48,6 +48,10 @@ impl CopilotSendMessage {
         }
     }
 
+    pub fn add_chat_to_history(&mut self, message: ChatMessage) {
+        self.chat_history.push(message)
+    }
+
     pub fn from_agent_message(message: AgentMessage, chat: &mut Chat) -> Self {
         let input = message.get_value().to_string();
         let chat_history = chat.get_chat_history();
@@ -127,7 +131,11 @@ impl CopilotMessage {
         let action = "Combined".to_string();
         for chunk in chunks {
             if let Some(chunk_output) = chunk.output {
-                output.push_str(&chunk_output);
+                if output == "Processing Results\n" {
+                    output.push_str("");
+                } else {
+                    output.push_str(&chunk_output)
+                }
             }
         }
         Self {

@@ -86,10 +86,13 @@ async fn handle_connection(
     copilot_endpoint: String,
 ) -> Result<(), Box<Error>> {
     match ConnectionType::instantiate_connection_type(&stream).await {
-        ConnectionType::Copilot(_, _) => {
+        Ok(ConnectionType::Copilot(_, _)) => {
             handle_copilot_connection(stream, client, chat_manager, copilot_endpoint).await
         }
-        ConnectionType::People(_, _) => handle_human_connection(stream, client, chat_manager).await,
+        Ok(ConnectionType::People(_, _)) => {
+            handle_human_connection(stream, client, chat_manager).await
+        }
+        Err(e) => Err(Box::new(anyhow!(e.to_string()))),
     }
 }
 
@@ -289,7 +292,10 @@ async fn handle_copilot_messages<W>(
                 } else {
                     let message_json = serde_json::json!(message_type).to_string();
                     if let Err(e) = tx.send(WsMessage::Text(message_json)) {
-                        eprintln!("Error broadcasting copilot message: {:?}", e);
+                        let error_json = serde_json::json!({
+                            "error": "Failed to parse message"
+                        });
+                        let _ = tx.send(WsMessage::Text(error_json.to_string()));
                     }
                 }
             }
@@ -300,10 +306,12 @@ async fn handle_copilot_messages<W>(
 }
 async fn handle_user_message(chat: &mut Chat, client: &Arc<Client>, user_msg: AgentMessage) {
     if let Err(e) = chat
-        .send_message_to_db(client, MessageType::User(user_msg))
+        .send_message_to_db(client, MessageType::User(user_msg.clone()))
         .await
     {
         eprintln!("Failed to send user message to db: {:?}", e);
+    } else {
+        chat.add_message(MessageType::User(user_msg));
     }
 }
 
@@ -316,58 +324,74 @@ async fn send_post_request_and_stream_response(
 ) {
     let url = copilot_endpoint;
     let http_client = HttpClient::new();
-    let response = http_client
-        .post(url)
-        .json(&user_msg)
-        .send()
-        .await
-        .expect("Failed to send POST request");
+    match http_client.post(url).json(&user_msg).send().await {
+        Ok(response) => {
+            let mut stream = response.bytes_stream();
+            let mut buffer = Vec::new();
+            let tx = chat_manager
+                .get_or_create_chat(chat.get_chat_id().to_string())
+                .await;
 
-    let mut stream = response.bytes_stream();
-    let mut buffer = Vec::new();
-    let tx = chat_manager
-        .get_or_create_chat(chat.get_chat_id().to_string())
-        .await;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(chunk) => {
+                        let chunks = std::str::from_utf8(&chunk)
+                            .unwrap()
+                            .split_inclusive('}')
+                            .collect::<Vec<_>>();
 
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(chunk) => {
-                println!("Received chunk: {:?}", chunk);
-                let chunks = std::str::from_utf8(&chunk)
-                    .unwrap()
-                    .split_inclusive('}')
-                    .collect::<Vec<_>>();
+                        for chunk in chunks {
+                            let message_text = chunk;
 
-                for chunk in chunks {
-                    let message_text = chunk;
-
-                    if let Err(e) = tx.send(WsMessage::Text(message_text.to_string())) {
-                        eprintln!("Error broadcasting raw copilot message: {:?}", e);
+                            if let Err(e) = tx.send(WsMessage::Text(message_text.to_string())) {
+                                eprintln!("Error broadcasting raw copilot message: {:?}", e);
+                            }
+                            let copilot_chunk = serde_json::from_str::<CopilotChunk>(chunk)
+                                .expect("Failed to parse copilot chunk");
+                            buffer.push(copilot_chunk);
+                        }
                     }
-                    let copilot_chunk = serde_json::from_str::<CopilotChunk>(chunk)
-                        .expect("Failed to parse copilot chunk");
-                    buffer.push(copilot_chunk);
+                    Err(e) => {
+                        let error_json = serde_json::json!({
+                            "error": format!("Failed to get chunk: {:?}", e)
+                        });
+                        if let Err(e) = tx.send(WsMessage::Text(error_json.to_string())) {
+                            eprintln!("Error broadcasting error message: {:?}", e);
+                        }
+                    }
                 }
             }
-            Err(e) => eprintln!("Error reading stream response: {:?}", e),
+
+            let copilot_message = CopilotMessage::new(buffer);
+            chat.add_message(MessageType::Copilot(copilot_message.clone()));
+            if let Err(e) = chat
+                .send_message_to_db(&client, MessageType::Copilot(copilot_message.clone()))
+                .await
+            {
+                eprintln!("Failed to send copilot message to db: {:?}", e);
+            }
+            let message_text = serde_json::json!(copilot_message).to_string();
+            if let Err(e) = tx.send(WsMessage::Text(message_text)) {
+                eprintln!("Error broadcasting copilot message: {:?}", e);
+            }
+
+            let final_json = serde_json::json!({  "action": "end",  "output": ""});
+
+            if let Err(e) = tx.send(WsMessage::Text(final_json.to_string())) {
+                eprintln!("Error broadcasting initial copilot message: {:?}", e);
+            }
         }
-    }
-
-    let copilot_message = CopilotMessage::new(buffer);
-    chat.add_message(MessageType::Copilot(copilot_message.clone()));
-    if let Err(e) = chat
-        .send_message_to_db(&client, MessageType::Copilot(copilot_message.clone()))
-        .await
-    {
-        eprintln!("Failed to send copilot message to db: {:?}", e);
-    }
-    let message_text = serde_json::json!(copilot_message).to_string();
-    if let Err(e) = tx.send(WsMessage::Text(message_text)) {
-        eprintln!("Error broadcasting copilot message: {:?}", e);
-    }
-    let initial_json = serde_json::json!({  "action": "end",  "output": ""});
-
-    if let Err(e) = tx.send(WsMessage::Text(initial_json.to_string())) {
-        eprintln!("Error broadcasting initial copilot message: {:?}", e);
+        Err(e) => {
+            let error_json = serde_json::json!({
+            "error": format!("Failed to send post request: {:?}", e)
+            });
+            if let Err(e) = chat_manager
+                .get_or_create_chat(chat.get_chat_id().to_string())
+                .await
+                .send(WsMessage::Text(error_json.to_string()))
+            {
+                eprintln!("Error broadcasting error message: {:?}", e);
+            }
+        }
     }
 }

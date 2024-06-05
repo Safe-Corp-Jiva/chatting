@@ -56,30 +56,38 @@ pub async fn generate_params_from_url(stream: &TcpStream) -> Result<(String, Str
     let mut headers = [EMPTY_HEADER; 30];
     let mut req = Request::new(&mut headers);
 
-    let nbytes = stream
-        .peek(&mut buf)
-        .await
-        .expect("Failed to read from stream");
-    let _parsed = req
-        .parse(&buf[..nbytes])
-        .expect("Failed to parse HTTP request");
-    let path = req.path.expect("Request path is required");
+    let nbytes = match stream.peek(&mut buf).await {
+        Ok(n) if n > 0 => n,
+        Ok(_) => return Err("No data read from stream".to_string()),
+        Err(_) => return Err("Failed to read from stream".to_string()),
+    };
 
-    let url = Url::parse(&format!("http://dummyhost{}", path)).expect("Failed to parse URL");
+    let req = match req.parse(&buf[..nbytes]) {
+        Ok(_) => req,
+        Err(_) => return Err("Failed to parse request".to_string()),
+    };
+
+    let path = req
+        .path
+        .ok_or_else(|| "Request path is required".to_string())?;
+
+    let url = Url::parse(&format!("http://dummyhost{}", path))
+        .map_err(|_| "Failed to parse URL".to_string())?;
+
     let chat_id = url
         .query_pairs()
         .find(|(k, _)| k == "agentID")
-        .map(|(_, v)| v)
+        .map(|(_, v)| v.to_string())
         .unwrap_or_default();
 
     let owner = url
         .query_pairs()
         .find(|(k, _)| k == "secondaryID")
-        .map(|(_, v)| v)
+        .map(|(_, v)| v.to_string())
         .unwrap_or_default();
-    Ok((chat_id.to_string(), owner.to_string()))
-}
 
+    Ok((chat_id, owner))
+}
 pub async fn send_chat_to_db(chat: Chat, client: Arc<Client>) -> Result<(), MessageError> {
     let table_name = "Chats";
     let chat_id = chat.get_chat_id().to_string();
