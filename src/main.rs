@@ -246,12 +246,21 @@ async fn handle_human_messages<W>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut read = read.lock().await;
     while let Some(Ok(message)) = read.next().await {
-        let message_to_send = serde_json::from_str::<AgentMessage>(&message.to_string())
-            .expect("Failed to parse message");
-        handle_user_message(chat, &client, message_to_send.clone()).await;
-        let message_json = serde_json::json!(message_to_send).to_string();
-        if let Err(e) = tx.send(WsMessage::Text(message_json)) {
-            eprintln!("Error broadcasting user message: {:?}", e);
+        match serde_json::from_str::<AgentMessage>(&message.to_string()) {
+            Ok(message) => {
+                let client = client.clone();
+                handle_user_message(chat, &client, message.clone()).await;
+                let message_json = serde_json::json!(message).to_string();
+                if let Err(e) = tx.send(WsMessage::Text(message_json)) {
+                    eprintln!("Error broadcasting user message: {:?}", e);
+                }
+            }
+            Err(e) => {
+                let error_json = serde_json::json!({
+                    "error": "Failed to parse message"
+                });
+                let _ = tx.send(WsMessage::Text(error_json.to_string()));
+            }
         }
     }
     Ok(())

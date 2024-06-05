@@ -75,17 +75,22 @@ impl fmt::Display for MessageType {
 
 #[derive(Serialize, Debug, Clone)]
 pub struct ChatMessage {
-    chat_id: String,
-    message: String,
-    sender: String,
+    content: String,
+    role: String,
 }
 
 impl ChatMessage {
-    pub fn new(chat_id: String, message: String, sender: String) -> Self {
-        Self {
-            chat_id,
-            message,
-            sender,
+    pub fn new(_chat_id: String, message: String, sender: String) -> Self {
+        let copilot_match = "Copilot".to_string();
+        match sender {
+            copilot_match => Self {
+                content: message,
+                role: "ai".to_string(),
+            },
+            _ => Self {
+                content: message,
+                role: "human".to_string(),
+            },
         }
     }
 }
