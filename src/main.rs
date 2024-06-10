@@ -368,6 +368,10 @@ async fn send_notification(
                 ) {
                     id
                     primaryID
+                    secondaryID
+                    notification_type
+                    createdAt
+                    updatedAt
                 }
             }
     ",
