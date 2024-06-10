@@ -5,8 +5,9 @@ use connections::ConnectionType;
 use copilot::{CopilotChunk, CopilotSendMessage};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, Stream, StreamExt};
-use regex::Regex;
+use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client as HttpClient;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
@@ -51,14 +52,13 @@ impl ChatManager {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let client = Client::new(&config);
     let chat_manager = Arc::new(ChatManager::new());
 
-    let copilot_endpoint =
-        env::var("COPILOT_ENDPOINT").expect("Could not load Copilot endpoint 🤖");
+    let copilot_endpoint = env::var("COPILOT_ENDPOINT")?;
 
     println!("Copilot endpoint: {:?}", copilot_endpoint);
 
@@ -77,6 +77,8 @@ async fn main() {
             }
         });
     }
+
+    Ok(())
 }
 
 async fn handle_connection(
@@ -249,10 +251,21 @@ async fn handle_human_messages<W>(
         match serde_json::from_str::<AgentMessage>(&message.to_string()) {
             Ok(message) => {
                 let client = client.clone();
-                handle_user_message(chat, &client, message.clone()).await;
+                handle_user_message(chat, &client, message.clone()).await?;
                 let message_json = serde_json::json!(message).to_string();
                 if let Err(e) = tx.send(WsMessage::Text(message_json)) {
                     eprintln!("Error broadcasting user message: {:?}", e);
+                } else {
+                    // Send notification that message was received
+                    let primary_id = chat.get_agent_id().to_string();
+                    let secondary_id = chat.get_secondary_id().to_string();
+                    let notification_type = "HUMAN";
+                    match send_notification(primary_id, secondary_id, notification_type.to_string())
+                        .await
+                    {
+                        Ok(_) => println!("Notification sent"),
+                        Err(e) => eprintln!("Error sending notification: {:?}", e),
+                    }
                 }
             }
             Err(e) => {
@@ -282,7 +295,7 @@ async fn handle_copilot_messages<W>(
             Ok(message_type) => {
                 if let MessageType::User(ref user_msg) = message_type {
                     let client = client.clone();
-                    handle_user_message(chat, &client, user_msg.clone()).await;
+                    handle_user_message(chat, &client, user_msg.clone()).await?;
                     let copilot_send_message =
                         CopilotSendMessage::from_agent_message(user_msg.clone(), chat);
                     println!("Sending message to copilot: {:?}", copilot_send_message);
@@ -293,7 +306,7 @@ async fn handle_copilot_messages<W>(
                         copilot_endpoint.clone(),
                         client,
                     )
-                    .await;
+                    .await?;
                     let message_json = serde_json::json!(message_type).to_string();
                     if let Err(e) = tx.send(WsMessage::Text(message_json)) {
                         eprintln!("Error broadcasting user message: {:?}", e);
@@ -313,7 +326,12 @@ async fn handle_copilot_messages<W>(
     }
     Ok(())
 }
-async fn handle_user_message(chat: &mut Chat, client: &Arc<Client>, user_msg: AgentMessage) {
+async fn handle_user_message(
+    chat: &mut Chat,
+    client: &Arc<Client>,
+    user_msg: AgentMessage,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Send message to database
     if let Err(e) = chat
         .send_message_to_db(client, MessageType::User(user_msg.clone()))
         .await
@@ -322,6 +340,55 @@ async fn handle_user_message(chat: &mut Chat, client: &Arc<Client>, user_msg: Ag
     } else {
         chat.add_message(MessageType::User(user_msg));
     }
+
+    Ok(())
+}
+
+async fn send_notification(
+    primary_id: String,
+    secondary_id: String,
+    notification_type: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let url = env::var("GRAPHQL_API_URL")?;
+    let api_key = env::var("GRAPHQL_API_KEY")?;
+    let http_client = HttpClient::new();
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+    headers.insert("x-api-key", HeaderValue::from_str(&api_key)?);
+
+    let query = json!({
+        "query": "
+            mutation sendNotification($primaryID: String!, $secondaryID: String!, $notification_type: NotificationType!) {
+                createNotification(
+                    input: {
+                        primaryID: $primaryID, 
+                        secondaryID: $secondaryID, 
+                        notification_type: $notification_type
+                    }
+                ) {
+                    id
+                    primaryID
+                }
+            }
+    ",
+        "variables": {
+            "primaryID": primary_id,
+            "secondaryID": secondary_id,
+            "notification_type": notification_type
+        }
+    });
+
+    let response = http_client
+        .post(url)
+        .headers(headers)
+        .json(&query)
+        .send()
+        .await?;
+
+    let response_body: Value = response.json().await?;
+
+    println!("GraphQL Notification Reponse: {:#?}", response_body);
+    Ok(())
 }
 
 async fn send_post_request_and_stream_response(
@@ -330,9 +397,11 @@ async fn send_post_request_and_stream_response(
     chat_manager: Arc<ChatManager>,
     copilot_endpoint: String,
     client: Arc<Client>,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     let url = copilot_endpoint;
     let http_client = HttpClient::new();
+    let primary_id = chat.get_agent_id().to_string();
+    let secondary_id = chat.get_secondary_id().to_string();
     match http_client.post(url).json(&user_msg).send().await {
         Ok(response) => {
             let mut stream = response.bytes_stream();
@@ -382,13 +451,21 @@ async fn send_post_request_and_stream_response(
             let message_text = serde_json::json!(copilot_message).to_string();
             if let Err(e) = tx.send(WsMessage::Text(message_text)) {
                 eprintln!("Error broadcasting copilot message: {:?}", e);
+            } else {
+                let notification_type = "COPILOT";
+                match send_notification(primary_id, secondary_id, notification_type.to_string())
+                    .await
+                {
+                    Ok(_) => println!("Notification sent"),
+                    Err(e) => eprintln!("Error sending notification: {:?}", e),
+                }
             }
 
             let final_json = serde_json::json!({  "action": "end",  "output": ""});
 
-            if let Err(e) = tx.send(WsMessage::Text(final_json.to_string())) {
-                eprintln!("Error broadcasting initial copilot message: {:?}", e);
-            }
+            tx.send(WsMessage::Text(final_json.to_string()))?;
+
+            Ok(())
         }
         Err(e) => {
             let error_json = serde_json::json!({
@@ -400,6 +477,9 @@ async fn send_post_request_and_stream_response(
                 .send(WsMessage::Text(error_json.to_string()))
             {
                 eprintln!("Error broadcasting error message: {:?}", e);
+                Err(Box::new(e))
+            } else {
+                Ok(())
             }
         }
     }
